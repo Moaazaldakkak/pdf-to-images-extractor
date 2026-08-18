@@ -3,3 +3,6 @@
 document.pdf
 page_one.jpg
 *.jpg
+
+# Composer dependencies
+/vendor/
