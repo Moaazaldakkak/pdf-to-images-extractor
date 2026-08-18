@@ -505,8 +505,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             font-family: "Segoe UI", Arial, sans-serif;
             background: #f0f2f5;
             display: flex;
-            justify-content: center;
-            padding: 60px 20px;
+            flex-direction: column;
+            align-items: center;
+            min-height: 100vh;
+            padding: 60px 20px 0;
         }
         .card {
             background: #fff;
@@ -649,6 +651,28 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         .grid-tools.visible { display: flex; }
         .page-hint { font-size: 13px; color: #6b7280; }
         .hidden { display: none !important; }
+        .form-fields.busy { opacity: 0.55; pointer-events: none; transition: opacity 0.2s; }
+        .footer-bar {
+            margin-top: auto;
+            margin-left: -20px;
+            margin-right: -20px;
+            width: calc(100% + 40px);
+            padding: 24px 24px 16px;
+            border-top: 1px solid #e5e7eb;
+            background: #fff;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            flex-wrap: wrap;
+            gap: 8px;
+            font-size: 13px;
+            color: #6b7280;
+            border-radius: 0;
+        }
+        .footer-bar .links { display: flex; align-items: center; gap: 12px; }
+        .footer-bar a { color: #6b7280; text-decoration: none; display: inline-flex; align-items: center; gap: 5px; transition: color 0.2s; }
+        .footer-bar a:hover { color: #4f46e5; }
+        .footer-bar svg { width: 18px; height: 18px; fill: currentColor; }
     </style>
 </head>
 <body>
@@ -669,6 +693,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             <input type="hidden" name="useCache" id="use-cache-input" value="">
             <input type="hidden" name="specificPages" id="specific-pages-input" value="">
 
+            <div id="form-fields" class="form-fields">
             <div class="section">
                 <label class="block" for="pdf">PDF file</label>
                 <input type="file" name="pdf" id="pdf" accept="application/pdf" required>
@@ -738,6 +763,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     </div>
                 </div>
             </div>
+            </div>
 
             <div class="progress-block" id="upload-progress">
                 <div class="progress-label">
@@ -763,6 +789,25 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         <div id="js-error" class="alert error" style="display:none;"></div>
 
         <div class="results" id="results"></div>
+    </div>
+
+    <footer class="footer-bar">
+            <span>Developed by <strong>Muaz Aldakkak</strong></span>
+            <div class="links">
+                <a href="https://www.linkedin.com/in/moaaz-aldakkak/" target="_blank" rel="noopener" title="LinkedIn">
+                    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M19 3a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h14m-.5 15.5v-5.3a3.26 3.26 0 0 0-3.26-3.26c-.85 0-1.84.52-2.32 1.3v-1.11h-2.79v8.37h2.79v-4.93c0-.77.62-1.4 1.39-1.4a1.4 1.4 0 0 1 1.4 1.4v4.93h2.79M6.88 8.56a1.68 1.68 0 0 0 1.68-1.68c0-.93-.75-1.69-1.68-1.69a1.69 1.69 0 0 0-1.69 1.69c0 .93.76 1.68 1.69 1.68m1.39 9.94v-8.37H5.5v8.37h2.77z"/></svg>
+                    <span>LinkedIn</span>
+                </a>
+                <a href="https://github.com/Moaazaldakkak" target="_blank" rel="noopener" title="GitHub">
+                    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 0C5.37 0 0 5.37 0 12c0 5.3 3.44 9.8 8.21 11.39.6.11.82-.26.82-.58v-2.03c-3.34.72-4.04-1.61-4.04-1.61-.55-1.39-1.34-1.76-1.34-1.76-1.09-.74.08-.73.08-.73 1.21.09 1.84 1.24 1.84 1.24 1.07 1.83 2.81 1.3 3.5 1 .11-.78.42-1.31.76-1.61-2.67-.3-5.47-1.33-5.47-5.93 0-1.31.47-2.38 1.24-3.22-.13-.3-.54-1.52.11-3.18 0 0 1.01-.32 3.3 1.23a11.5 11.5 0 0 1 6.01 0c2.29-1.55 3.3-1.23 3.3-1.23.65 1.66.24 2.88.12 3.18.77.84 1.23 1.91 1.23 3.22 0 4.61-2.8 5.62-5.48 5.92.43.37.81 1.1.81 2.22v3.29c0 .32.22.7.83.58C20.57 21.79 24 17.3 24 12c0-6.63-5.37-12-12-12z"/></svg>
+                    <span>GitHub</span>
+                </a>
+                <a href="mailto:muazaldakkak@gmail.com" title="muazaldakkak@gmail.com">
+                    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 4H4c-1.1 0-1.99.9-1.99 2L2 18c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V6c0-1.1-.9-2-2-2zm0 4-8 5-8-5V6l8 5 8-5v2z"/></svg>
+                    <span>Email</span>
+                </a>
+            </div>
+        </footer>
     </div>
 
     <script>
@@ -803,6 +848,23 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
         function hideError() {
             errBox.style.display = 'none';
+        }
+
+        function setBusy(on) {
+            document.getElementById('form-fields').classList.toggle('busy', on);
+            btn.disabled = on;
+            btn.textContent = on ? 'Working...' : 'Extract Images';
+        }
+
+        function notifyUser(body) {
+            try {
+                if (('Notification' in window) && Notification.permission === 'granted') {
+                    new Notification('PDF to Images', { body: body });
+                }
+            } catch (e) {}
+            var old = document.title;
+            document.title = body + ' — PDF to Images';
+            setTimeout(function () { document.title = old; }, 8000);
         }
 
         function cardRadio(name, cardId, checkedId) {
@@ -1028,8 +1090,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
             hideError();
             resultsBox.innerHTML = '';
-            btn.disabled = true;
-            btn.textContent = 'Working...';
+            setBusy(true);
+
+            if (('Notification' in window) && Notification.permission === 'default') {
+                Notification.requestPermission();
+            }
 
             var token = tokenInput.value;
             setBar('convert-bar', 0, true);
@@ -1071,8 +1136,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
             xhr.addEventListener('load', function () {
                 clearInterval(pollTimer);
-                btn.disabled = false;
-                btn.textContent = 'Extract Images';
+                setBusy(false);
                 try {
                     var res = JSON.parse(xhr.responseText);
                     if (res.ok) {
@@ -1080,6 +1144,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                         document.getElementById('convert-label').textContent = 'Done — extracted ' + res.files.length + ' image(s)!';
                         document.getElementById('convert-pct').textContent = '100%';
                         renderResults(res.files);
+                        notifyUser('Done! Extracted ' + res.files.length + ' image(s).');
                         form.reset();
                         resetLoadedUI();
                     } else {
@@ -1087,17 +1152,19 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                         setBar('convert-bar', 0, false);
                         document.getElementById('convert-label').textContent = 'Failed.';
                         document.getElementById('convert-pct').textContent = '';
+                        notifyUser('Conversion failed.');
                     }
                 } catch (ex) {
                     showError('Unexpected server response.');
+                    notifyUser('Unexpected server response.');
                 }
             });
 
             xhr.addEventListener('error', function () {
                 clearInterval(pollTimer);
-                btn.disabled = false;
-                btn.textContent = 'Extract Images';
+                setBusy(false);
                 showError('Network error during processing.');
+                notifyUser('Network error during processing.');
             });
 
             xhr.open('POST', '', true);
