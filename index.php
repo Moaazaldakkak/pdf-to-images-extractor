@@ -1,38 +1,16 @@
 <?php
 $outputDir = __DIR__ . '/extracted';
 $progressDir = sys_get_temp_dir() . '/pdf2img_progress';
+$uploadDir = sys_get_temp_dir() . '/pdf2img_uploads';
 $files = [];
 $errors = [];
 $success = false;
 $isXhr = ($_SERVER['HTTP_X_REQUESTED_WITH'] ?? '') === 'XMLHttpRequest';
 $hasVendor = file_exists(__DIR__ . '/vendor/autoload.php');
 
-function parsePages(string $input, int $total): array
+function sanitizeToken(string $token): string
 {
-    $pages = [];
-    foreach (explode(',', $input) as $part) {
-        $part = trim($part);
-        if ($part === '') {
-            continue;
-        }
-        if (strpos($part, '-') !== false) {
-            [$start, $end] = array_map('trim', explode('-', $part, 2));
-            if (!ctype_digit($start) || !ctype_digit($end) || $end < $start) {
-                continue;
-            }
-            for ($i = (int)$start; $i <= (int)$end; $i++) {
-                if ($i >= 1 && $i <= $total) {
-                    $pages[] = $i;
-                }
-            }
-        } elseif (ctype_digit($part)) {
-            $n = (int)$part;
-            if ($n >= 1 && $n <= $total) {
-                $pages[] = $n;
-            }
-        }
-    }
-    return array_values(array_unique($pages));
+    return preg_replace('/[^a-zA-Z0-9_-]/', '', $token);
 }
 
 function applyPngPredictor(string $data, int $colors, int $bpc, int $columns): string
@@ -262,7 +240,7 @@ function writeProgress(string $token, array $data): void
     if ($token === '') {
         return;
     }
-    $token = preg_replace('/[^a-zA-Z0-9_-]/', '', $token);
+    $token = sanitizeToken($token);
     if ($token === '') {
         return;
     }
@@ -276,9 +254,27 @@ function writeProgress(string $token, array $data): void
 function clearProgress(string $token): void
 {
     global $progressDir;
-    $token = preg_replace('/[^a-zA-Z0-9_-]/', '', $token);
+    $token = sanitizeToken($token);
     if ($token !== '') {
         @unlink($progressDir . '/' . $token . '.json');
+    }
+}
+
+function sweepUploads(string $dir, int $maxAgeSec = 21600): void
+{
+    foreach (glob($dir . '/*.pdf') ?: [] as $f) {
+        if (time() - filemtime($f) > $maxAgeSec) {
+            @unlink($f);
+        }
+    }
+}
+
+function sweepOld(string $dir, string $ext, int $maxAgeSec = 21600): void
+{
+    foreach (glob($dir . '/*.' . $ext) ?: [] as $f) {
+        if (time() - filemtime($f) > $maxAgeSec) {
+            @unlink($f);
+        }
     }
 }
 
@@ -314,7 +310,7 @@ if (isset($_GET['action']) && $_GET['action'] === 'zip') {
 
 if (isset($_GET['ajax']) && $_GET['ajax'] === 'progress') {
     header('Content-Type: application/json');
-    $token = preg_replace('/[^a-zA-Z0-9_-]/', '', $_GET['token'] ?? '');
+    $token = sanitizeToken($_GET['token'] ?? '');
     if ($token === '') {
         echo json_encode(['phase' => 'none']);
         exit;
@@ -328,17 +324,66 @@ if (isset($_GET['ajax']) && $_GET['ajax'] === 'progress') {
     exit;
 }
 
-if ($_SERVER['REQUEST_METHOD'] === 'POST') {
-    $token = $_POST['token'] ?? '';
+if (($_POST['ajax'] ?? '') === 'upload') {
+    header('Content-Type: application/json');
+    $token = sanitizeToken($_POST['token'] ?? '');
+    if ($token === '' || !isset($_FILES['pdf']) || $_FILES['pdf']['error'] !== UPLOAD_ERR_OK) {
+        echo json_encode(['ok' => false, 'error' => 'There was a problem receiving the PDF.']);
+        exit;
+    }
+    $file = $_FILES['pdf'];
+    if (pathinfo($file['name'], PATHINFO_EXTENSION) !== 'pdf' || mime_content_type($file['tmp_name']) !== 'application/pdf') {
+        echo json_encode(['ok' => false, 'error' => 'The uploaded file must be a PDF.']);
+        exit;
+    }
+    if (!is_dir($uploadDir)) {
+        @mkdir($uploadDir, 0777, true);
+    }
+    sweepUploads($uploadDir);
+    sweepOld($progressDir, 'json');
+    $dest = $uploadDir . '/' . $token . '.pdf';
+    @unlink($dest);
+    if (!move_uploaded_file($file['tmp_name'], $dest)) {
+        echo json_encode(['ok' => false, 'error' => 'Could not store the uploaded PDF.']);
+        exit;
+    }
     try {
-        if (!isset($_FILES['pdf']) || $_FILES['pdf']['error'] !== UPLOAD_ERR_OK) {
-            throw new Exception('Please choose a PDF file to upload.');
+        $count = new Imagick();
+        $count->pingImage($dest);
+        $total = $count->getNumberImages();
+        $count->clear();
+        $count->destroy();
+        if ($total <= 0) {
+            throw new Exception('Could not read the PDF.');
         }
-        $file = $_FILES['pdf'];
-        if (pathinfo($file['name'], PATHINFO_EXTENSION) !== 'pdf' || mime_content_type($file['tmp_name']) !== 'application/pdf') {
-            throw new Exception('The uploaded file must be a PDF.');
+        echo json_encode(['ok' => true, 'total' => $total, 'name' => $file['name']]);
+    } catch (Exception $e) {
+        @unlink($dest);
+        echo json_encode(['ok' => false, 'error' => $e->getMessage()]);
+    }
+    exit;
+}
+
+if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+    $token = sanitizeToken($_POST['token'] ?? '');
+    try {
+        $useCache = !empty($_POST['useCache']);
+        $cached = $uploadDir . '/' . $token . '.pdf';
+        if ($useCache) {
+            if ($token === '' || !is_file($cached)) {
+                throw new Exception('The uploaded PDF expired. Please upload the file and load the pages again.');
+            }
+            $pdfPath = $cached;
+        } else {
+            if (!isset($_FILES['pdf']) || $_FILES['pdf']['error'] !== UPLOAD_ERR_OK) {
+                throw new Exception('Please choose a PDF file to upload.');
+            }
+            $file = $_FILES['pdf'];
+            if (pathinfo($file['name'], PATHINFO_EXTENSION) !== 'pdf' || mime_content_type($file['tmp_name']) !== 'application/pdf') {
+                throw new Exception('The uploaded file must be a PDF.');
+            }
+            $pdfPath = $file['tmp_name'];
         }
-        $pdfPath = $file['tmp_name'];
         $mode = $_POST['mode'] ?? 'convert';
         if (!in_array($mode, ['convert', 'extract'], true)) {
             $mode = 'convert';
@@ -358,15 +403,32 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             throw new Exception('Could not read the PDF.');
         }
 
-        $pageInput = trim($_POST['pages'] ?? '');
-        if ($pageInput === '' || strtolower($pageInput) === 'all') {
-            $pages = range(1, $totalPages);
-        } else {
-            $pages = parsePages($pageInput, $totalPages);
+        $pageMode = $_POST['pageMode'] ?? 'all';
+        switch ($pageMode) {
+            case 'range':
+                $from = max(1, min($totalPages, (int)($_POST['rangeFrom'] ?? 1)));
+                $to = max(1, min($totalPages, (int)($_POST['rangeTo'] ?? $totalPages)));
+                if ($from > $to) {
+                    throw new Exception('Invalid range: the start page must not be after the end page.');
+                }
+                $pages = range($from, $to);
+                break;
+            case 'specific':
+                $pages = [];
+                foreach (explode(',', $_POST['specificPages'] ?? '') as $p) {
+                    $n = (int)trim($p);
+                    if ($n >= 1 && $n <= $totalPages) {
+                        $pages[] = $n;
+                    }
+                }
+                $pages = array_values(array_unique($pages));
+                break;
+            default:
+                $pages = range(1, $totalPages);
         }
 
         if (empty($pages)) {
-            throw new Exception("No valid pages selected. The PDF has {$totalPages} page(s). Use formats like \"1,3,5-7\" or \"all\".");
+            throw new Exception("No valid pages selected. The PDF has {$totalPages} page(s).");
         }
 
         if (!is_dir($outputDir)) {
@@ -375,11 +437,15 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
         set_time_limit(0);
 
+        $dpi = (int)($_POST['dpi'] ?? 150);
+        if (!in_array($dpi, [72, 96, 150, 200, 300], true)) {
+            $dpi = 150;
+        }
         if ($mode === 'extract') {
             require_once __DIR__ . '/vendor/autoload.php';
             writeProgress($token, ['phase' => 'converting', 'done' => 0, 'total' => count($pages), 'message' => 'Scanning pages for embedded images...']);
             $skipped = 0;
-            $found = extractEmbeddedImages($pdfPath, $pages, $outputDir, $files, $totalPages, $token, $skipped);
+            extractEmbeddedImages($pdfPath, $pages, $outputDir, $files, $totalPages, $token, $skipped);
             if (empty($files)) {
                 throw new Exception($skipped > 0 ? 'Found ' . $skipped . ' embedded image(s) but none could be extracted (unsupported filter or color space).' : 'No embedded images found on the selected pages.');
             }
@@ -394,7 +460,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
             foreach ($pages as $i => $page) {
                 $imagick = new Imagick();
-                $imagick->setResolution(300, 300);
+                $imagick->setResolution($dpi, $dpi);
                 $imagick->readImage($pdfPath . '[' . ($page - 1) . ']');
                 $imagick->setImageFormat('jpg');
                 $imagick->setImageCompressionQuality(90);
@@ -448,11 +514,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             box-shadow: 0 4px 20px rgba(0, 0, 0, 0.08);
             padding: 40px;
             width: 100%;
-            max-width: 560px;
+            max-width: 600px;
         }
         h1 { font-size: 24px; color: #1a1a2e; margin-bottom: 6px; }
         p.sub { color: #6b7280; font-size: 14px; margin-bottom: 28px; }
-        label { display: block; font-weight: 600; font-size: 14px; color: #374151; margin-bottom: 8px; }
+        label.block { display: block; font-weight: 600; font-size: 14px; color: #374151; margin-bottom: 8px; }
         input[type="file"] {
             width: 100%;
             padding: 14px;
@@ -462,16 +528,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             cursor: pointer;
             margin-bottom: 20px;
         }
-        input[type="text"] {
-            width: 100%;
-            padding: 12px 14px;
-            border: 1px solid #cbd5e1;
-            border-radius: 8px;
-            font-size: 15px;
-            margin-bottom: 8px;
-        }
-        input[type="text"]:focus { outline: none; border-color: #4f46e5; }
-        .hint { font-size: 13px; color: #9ca3af; margin-bottom: 24px; }
         button {
             width: 100%;
             padding: 14px;
@@ -486,6 +542,18 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         }
         button:hover { background: #4338ca; }
         button:disabled { background: #a5b4fc; cursor: not-allowed; }
+        .mini-btn {
+            display: inline-block;
+            width: auto;
+            padding: 8px 14px;
+            background: #4f46e5;
+            font-size: 13px;
+            font-weight: 600;
+            border-radius: 6px;
+        }
+        .mini-btn:hover { background: #4338ca; }
+        .mini-btn.ghost { background: #fff; color: #4f46e5; border: 1px solid #c7d2fe; }
+        .mini-btn.ghost:hover { background: #eef2ff; }
         .alert { border-radius: 8px; padding: 14px; margin-bottom: 20px; font-size: 14px; }
         .alert.error { background: #fef2f2; color: #b91c1c; border: 1px solid #fecaca; }
         .alert.success { background: #f0fdf4; color: #15803d; border: 1px solid #bbf7d0; }
@@ -506,7 +574,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         .results img { width: 100%; border-radius: 6px; border: 1px solid #e5e7eb; display: block; }
         .results a { font-size: 12px; color: #4f46e5; text-decoration: none; display: block; margin-top: 6px; }
         .results a:hover { text-decoration: underline; }
-        .progress-wrap { margin: 20px 0 24px; }
         .progress-label { display: flex; justify-content: space-between; font-size: 13px; color: #374151; margin-bottom: 6px; }
         .progress-label .pct { font-weight: 700; color: #4f46e5; }
         .bar-track { height: 12px; background: #e5e7eb; border-radius: 99px; overflow: hidden; }
@@ -522,27 +589,66 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             animation: pulse 1.2s ease-in-out infinite;
         }
         @keyframes pulse { 0%, 100% { opacity: 0.35; } 50% { opacity: 1; } }
-        .progress-block { display: none; }
+        .progress-block { display: none; margin: 18px 0; }
         .progress-block.visible { display: block; }
         .progress-sub { font-size: 12px; color: #9ca3af; margin-top: 4px; text-align: right; }
-        .mode-group { margin-bottom: 24px; }
-        .mode-group label {
-            display: flex;
-            align-items: center;
-            gap: 8px;
+        .section { margin-bottom: 24px; }
+        .mode-group { display: flex; gap: 8px; margin-bottom: 12px; }
+        .mode-group input { accent-color: #4f46e5; }
+        .mode-card {
+            flex: 1;
             padding: 10px 12px;
             border: 1px solid #e5e7eb;
             border-radius: 8px;
             cursor: pointer;
-            font-weight: 500;
+            font-weight: 600;
             font-size: 14px;
             color: #374151;
-            margin-bottom: 8px;
+            text-align: center;
             transition: border-color 0.2s, background 0.2s;
         }
-        .mode-group label:hover { border-color: #4f46e5; }
-        .mode-group label.checked { border-color: #4f46e5; background: #eef2ff; }
-        .mode-group input { accent-color: #4f46e5; }
+        .mode-card:hover { border-color: #4f46e5; }
+        .mode-card.checked { border-color: #4f46e5; background: #eef2ff; }
+        .mode-detail { display: none; padding: 14px; background: #f9fafb; border: 1px solid #e5e7eb; border-radius: 8px; margin-top: 10px; }
+        .mode-detail.visible { display: block; }
+        .mode-detail input[type="number"] {
+            width: 90px;
+            padding: 8px 10px;
+            border: 1px solid #cbd5e1;
+            border-radius: 6px;
+            font-size: 14px;
+        }
+        select {
+            padding: 8px 10px;
+            border: 1px solid #cbd5e1;
+            border-radius: 6px;
+            font-size: 14px;
+            background: #fff;
+        }
+        .detail-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 10px; font-size: 14px; color: #374151; }
+        .loaded-badge { display: none; margin-top: 10px; padding: 8px 12px; background: #eef2ff; color: #4338ca; border-radius: 6px; font-size: 13px; font-weight: 600; }
+        .loaded-badge.visible { display: block; }
+        .page-grid { margin-top: 10px; max-height: 260px; overflow-y: auto; display: grid; grid-template-columns: repeat(auto-fill, minmax(64px, 1fr)); gap: 6px; }
+        .page-grid label {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 4px;
+            padding: 7px 4px;
+            border: 1px solid #e5e7eb;
+            border-radius: 6px;
+            background: #fff;
+            cursor: pointer;
+            font-size: 13px;
+            font-weight: 500;
+            color: #374151;
+        }
+        .page-grid label.checked { border-color: #4f46e5; background: #eef2ff; color: #4338ca; }
+        .page-grid input { accent-color: #4f46e5; }
+        .grid-tools { display: none; margin-top: 8px; gap: 8px; }
+        .grid-tools.visible { display: flex; }
+        .page-hint { font-size: 13px; color: #6b7280; }
+        .hidden { display: none !important; }
     </style>
 </head>
 <body>
@@ -559,24 +665,78 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         <?php endif; ?>
 
         <form method="post" enctype="multipart/form-data" id="upload-form">
-            <input type="hidden" name="token" id="token-input" value="<?php echo htmlspecialchars($_POST['token'] ?? ''); ?>">
+            <input type="hidden" name="token" id="token-input" value="">
+            <input type="hidden" name="useCache" id="use-cache-input" value="">
+            <input type="hidden" name="specificPages" id="specific-pages-input" value="">
 
-            <label for="pdf">PDF file</label>
-            <input type="file" name="pdf" id="pdf" accept="application/pdf" required>
+            <div class="section">
+                <label class="block" for="pdf">PDF file</label>
+                <input type="file" name="pdf" id="pdf" accept="application/pdf" required>
+            </div>
 
-            <label for="pages">Pages to extract</label>
-            <input type="text" name="pages" id="pages" value="<?php echo htmlspecialchars($_POST['pages'] ?? 'all'); ?>">
-            <p class="hint">Examples: <code>all</code> (default), <code>1,3,5</code>, or a range like <code>2-5</code></p>
+            <div class="section">
+                <label class="block">Pages to extract</label>
+                <div class="mode-group">
+                    <label class="mode-card" id="page-card-all">
+                        <input type="radio" name="pageMode" value="all" checked> All
+                    </label>
+                    <label class="mode-card" id="page-card-range">
+                        <input type="radio" name="pageMode" value="range"> Range
+                    </label>
+                    <label class="mode-card" id="page-card-specific">
+                        <input type="radio" name="pageMode" value="specific"> Specific
+                    </label>
+                </div>
 
-            <div class="mode-group">
-                <label id="mode-label-convert">
-                    <input type="radio" name="mode" value="convert" id="mode-convert" <?php echo ($_POST['mode'] ?? 'convert') === 'convert' ? 'checked' : ''; ?>>
-                    <span><strong>Convert pages to images</strong><br><small style="font-weight:400;">Renders each selected page as a full-page JPG</small></span>
-                </label>
-                <label id="mode-label-extract">
-                    <input type="radio" name="mode" value="extract" id="mode-extract" <?php echo ($_POST['mode'] ?? '') === 'extract' ? 'checked' : ''; ?>>
-                    <span><strong>Extract images inside pages</strong><br><small style="font-weight:400;">Pulls out the original embedded photos/images as JPGs</small></span>
-                </label>
+                <div class="mode-detail" id="detail-all">
+                    <span class="page-hint">All pages of the uploaded PDF will be processed.</span>
+                </div>
+
+                <div class="mode-detail" id="detail-range">
+                    <div class="detail-row">
+                        From <input type="number" name="rangeFrom" id="range-from" min="1" value="1">
+                        to <input type="number" name="rangeTo" id="range-to" min="1" value="">
+                        <button type="button" class="mini-btn" id="load-btn-range">Load pages from PDF</button>
+                    </div>
+                    <div class="loaded-badge" id="range-loaded"></div>
+                </div>
+
+                <div class="mode-detail" id="detail-specific">
+                    <div class="detail-row">
+                        <button type="button" class="mini-btn" id="load-btn-specific">Load pages from PDF</button>
+                    </div>
+                    <div class="loaded-badge" id="specific-loaded"></div>
+                    <div class="grid-tools" id="grid-tools">
+                        <button type="button" class="mini-btn ghost" id="select-all-btn">Select all</button>
+                        <button type="button" class="mini-btn ghost" id="clear-all-btn">Clear</button>
+                    </div>
+                    <div class="page-grid" id="page-grid"></div>
+                </div>
+            </div>
+
+            <div class="section">
+                <label class="block">Extraction mode</label>
+                <div class="mode-group">
+                    <label class="mode-card" id="mode-label-convert">
+                        <input type="radio" name="mode" value="convert" id="mode-convert" checked> Page images
+                    </label>
+                    <label class="mode-card" id="mode-label-extract">
+                        <input type="radio" name="mode" value="extract" id="mode-extract"> Embedded images
+                    </label>
+                </div>
+                <div class="mode-detail visible" id="dpi-row">
+                    <div class="detail-row">
+                        Resolution:
+                        <select id="dpi-select" name="dpi">
+                            <option value="72" <?php echo ($_POST['dpi'] ?? 150) == 72 ? 'selected' : ''; ?>>72 DPI (screen)</option>
+                            <option value="96" <?php echo ($_POST['dpi'] ?? 150) == 96 ? 'selected' : ''; ?>>96 DPI (web)</option>
+                            <option value="150" <?php echo ($_POST['dpi'] ?? 150) == 150 ? 'selected' : ''; ?>>150 DPI (good)</option>
+                            <option value="200" <?php echo ($_POST['dpi'] ?? 150) == 200 ? 'selected' : ''; ?>>200 DPI (high)</option>
+                            <option value="300" <?php echo ($_POST['dpi'] ?? 150) == 300 ? 'selected' : ''; ?>>300 DPI (print)</option>
+                        </select>
+                        <span class="page-hint" id="dpi-hint"></span>
+                    </div>
+                </div>
             </div>
 
             <div class="progress-block" id="upload-progress">
@@ -610,8 +770,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         var form = document.getElementById('upload-form');
         var btn = document.getElementById('submit-btn');
         var tokenInput = document.getElementById('token-input');
+        var useCacheInput = document.getElementById('use-cache-input');
+        var specificPagesInput = document.getElementById('specific-pages-input');
         var errBox = document.getElementById('js-error');
         var resultsBox = document.getElementById('results');
+        var fileInput = document.getElementById('pdf');
+
+        var state = { loaded: false, total: 0, loadedName: '' };
 
         function fmt(bytes) {
             if (bytes < 1024) return bytes + ' B';
@@ -636,42 +801,241 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             errBox.style.display = 'block';
         }
 
-        function syncModeStyle() {
-            document.getElementById('mode-label-convert').classList.toggle('checked', document.getElementById('mode-convert').checked);
-            document.getElementById('mode-label-extract').classList.toggle('checked', document.getElementById('mode-extract').checked);
+        function hideError() {
+            errBox.style.display = 'none';
         }
-        document.getElementById('mode-convert').addEventListener('change', syncModeStyle);
-        document.getElementById('mode-extract').addEventListener('change', syncModeStyle);
-        syncModeStyle();
 
-        form.addEventListener('submit', function (e) {
-            e.preventDefault();
-            if (btn.disabled) return;
+        function cardRadio(name, cardId, checkedId) {
+            var checked = document.getElementById(checkedId);
+            document.getElementById(cardId).classList.toggle('checked', checked.checked);
+            return checked.checked;
+        }
 
-            var fileInput = document.getElementById('pdf');
+        function getPageMode() {
+            var r = document.querySelector('input[name="pageMode"]:checked');
+            return r ? r.value : 'all';
+        }
+
+        function syncPageMode() {
+            var mode = getPageMode();
+            document.getElementById('page-card-all').classList.toggle('checked', mode === 'all');
+            document.getElementById('page-card-range').classList.toggle('checked', mode === 'range');
+            document.getElementById('page-card-specific').classList.toggle('checked', mode === 'specific');
+            document.getElementById('detail-all').classList.toggle('visible', mode === 'all');
+            document.getElementById('detail-range').classList.toggle('visible', mode === 'range');
+            document.getElementById('detail-specific').classList.toggle('visible', mode === 'specific');
+        }
+
+        document.querySelectorAll('input[name="pageMode"]').forEach(function (el) {
+            el.addEventListener('change', syncPageMode);
+        });
+        syncPageMode();
+
+        document.getElementById('mode-convert').addEventListener('change', function () {
+            document.getElementById('mode-label-convert').classList.toggle('checked', this.checked);
+            syncDpiRow();
+        });
+        document.getElementById('mode-extract').addEventListener('change', function () {
+            document.getElementById('mode-label-extract').classList.toggle('checked', this.checked);
+            syncDpiRow();
+        });
+        document.getElementById('mode-convert').checked = true;
+        document.getElementById('mode-label-convert').classList.add('checked');
+
+        document.getElementById('dpi-select').addEventListener('change', function () {
+            var hint = document.getElementById('dpi-hint');
+            hint.textContent = (this.value === '300') ? 'Slow — takes ~4x longer.' : '';
+        });
+
+        function syncDpiRow() {
+            document.getElementById('dpi-row').classList.toggle('visible', document.getElementById('mode-convert').checked);
+        }
+        syncDpiRow();
+
+        function rotateToken() {
+            tokenInput.value = (crypto.randomUUID ? crypto.randomUUID() : 't' + Date.now() + Math.random().toString(16).slice(2));
+        }
+
+        fileInput.addEventListener('change', function () {
+            state.loaded = false;
+            state.total = 0;
+            state.loadedName = '';
+            useCacheInput.value = '';
+            document.getElementById('range-loaded').classList.remove('visible');
+            document.getElementById('specific-loaded').classList.remove('visible');
+            document.getElementById('grid-tools').classList.remove('visible');
+            document.getElementById('page-grid').innerHTML = '';
+            document.getElementById('range-to').value = '';
+            document.getElementById('range-from').value = '1';
+        });
+
+        function uploadForPageCount(onDone) {
             if (!fileInput.files.length) {
-                showError('Please choose a PDF file to upload.');
+                showError('Please choose a PDF file first.');
                 return;
             }
-
-            errBox.style.display = 'none';
-            resultsBox.innerHTML = '';
-            btn.disabled = true;
-            btn.textContent = 'Working...';
-
-            var token = (crypto.randomUUID ? crypto.randomUUID() : 't' + Date.now() + Math.random().toString(16).slice(2));
-            tokenInput.value = token;
+            rotateToken();
             var totalSize = fileInput.files[0].size;
-
+            hideError();
             showBlock('upload-progress', true);
-            showBlock('convert-progress', true);
+            showBlock('convert-progress', false);
             setBar('upload-bar', 0, false);
             document.getElementById('upload-label').textContent = 'Uploading ' + fileInput.files[0].name + '...';
             document.getElementById('upload-pct').textContent = '0%';
             document.getElementById('upload-sub').textContent = '0 B / ' + fmt(totalSize);
 
+            var fd = new FormData();
+            fd.append('ajax', 'upload');
+            fd.append('token', tokenInput.value);
+            fd.append('pdf', fileInput.files[0]);
+            var xhr = new XMLHttpRequest();
+
+            xhr.upload.addEventListener('progress', function (ev) {
+                if (!ev.lengthComputable) return;
+                var pct = Math.round((ev.loaded / ev.total) * 100);
+                setBar('upload-bar', pct, false);
+                document.getElementById('upload-pct').textContent = pct + '%';
+                document.getElementById('upload-sub').textContent =
+                    fmt(ev.loaded) + ' / ' + fmt(totalSize) + ' (' + fmt(Math.max(0, totalSize - ev.loaded)) + ' remaining)';
+            });
+
+            xhr.addEventListener('load', function () {
+                try {
+                    var res = JSON.parse(xhr.responseText);
+                    if (res.ok) {
+                        onDone(res);
+                    } else {
+                        showBlock('upload-progress', false);
+                        showError(res.error || 'Could not read the PDF.');
+                    }
+                } catch (ex) {
+                    showBlock('upload-progress', false);
+                    showError('Unexpected server response.');
+                }
+            });
+
+            xhr.addEventListener('error', function () {
+                showBlock('upload-progress', false);
+                showError('Network error while uploading.');
+            });
+
+            xhr.open('POST', '', true);
+            xhr.send(fd);
+        }
+
+        function buildPageGrid(total) {
+            var grid = document.getElementById('page-grid');
+            grid.innerHTML = '';
+            for (var i = 1; i <= total; i++) {
+                var label = document.createElement('label');
+                label.textContent = i;
+                var cb = document.createElement('input');
+                cb.type = 'checkbox';
+                cb.checked = true;
+                cb.addEventListener('change', function () {
+                    this.parentNode.classList.toggle('checked', this.checked);
+                });
+                label.appendChild(cb);
+                label.classList.add('checked');
+                grid.appendChild(label);
+            }
+        }
+
+        document.getElementById('load-btn-range').addEventListener('click', function () {
+            uploadForPageCount(function (res) {
+                showBlock('upload-progress', false);
+                state.loaded = true;
+                state.total = res.total;
+                state.loadedName = res.name;
+                useCacheInput.value = '1';
+                var from = document.getElementById('range-from');
+                var to = document.getElementById('range-to');
+                from.value = 1;
+                from.max = res.total;
+                to.value = res.total;
+                to.max = res.total;
+                to.min = 1;
+                var badge = document.getElementById('range-loaded');
+                badge.textContent = 'PDF loaded — ' + res.total + ' pages. Valid range: 1 to ' + res.total + '.';
+                badge.classList.add('visible');
+            });
+        });
+
+        document.getElementById('load-btn-specific').addEventListener('click', function () {
+            uploadForPageCount(function (res) {
+                showBlock('upload-progress', false);
+                state.loaded = true;
+                state.total = res.total;
+                state.loadedName = res.name;
+                useCacheInput.value = '1';
+                buildPageGrid(res.total);
+                var badge = document.getElementById('specific-loaded');
+                badge.textContent = 'PDF loaded — ' + res.total + ' pages. Pick which pages to extract:';
+                badge.classList.add('visible');
+                document.getElementById('grid-tools').classList.add('visible');
+            });
+        });
+
+        document.getElementById('select-all-btn').addEventListener('click', function () {
+            document.querySelectorAll('#page-grid input').forEach(function (cb) {
+                cb.checked = true;
+                cb.parentNode.classList.add('checked');
+            });
+        });
+        document.getElementById('clear-all-btn').addEventListener('click', function () {
+            document.querySelectorAll('#page-grid input').forEach(function (cb) {
+                cb.checked = false;
+                cb.parentNode.classList.remove('checked');
+            });
+        });
+
+        form.addEventListener('submit', function (e) {
+            e.preventDefault();
+            if (btn.disabled) return;
+
+            if (!fileInput.files.length) {
+                showError('Please choose a PDF file to upload.');
+                return;
+            }
+            var mode = getPageMode();
+            if (mode !== 'all' && (!state.loaded || useCacheInput.value !== '1')) {
+                showError('Click "Load pages from PDF" first to prepare the page selection.');
+                return;
+            }
+            if (mode === 'range') {
+                var from = parseInt(document.getElementById('range-from').value, 10);
+                var to = parseInt(document.getElementById('range-to').value, 10);
+                if (!from || !to || from < 1 || to < 1 || from > to) {
+                    showError('Enter a valid range (start page must be 1 or more and not after the end page).');
+                    return;
+                }
+                if (state.loaded && (from > state.total || to > state.total)) {
+                    showError('Range is out of bounds — the PDF has ' + state.total + ' page(s).');
+                    return;
+                }
+            }
+            if (mode === 'specific') {
+                var checked = [];
+                document.querySelectorAll('#page-grid input:checked').forEach(function (cb) {
+                    checked.push(parseInt(cb.parentNode.textContent.trim(), 10) || parseInt(cb.value, 10));
+                });
+                if (!checked.length) {
+                    showError('Select at least one page to extract.');
+                    return;
+                }
+                specificPagesInput.value = checked.join(',');
+            }
+
+            hideError();
+            resultsBox.innerHTML = '';
+            btn.disabled = true;
+            btn.textContent = 'Working...';
+
+            var token = tokenInput.value;
             setBar('convert-bar', 0, true);
-            document.getElementById('convert-label').textContent = 'Waiting for upload...';
+            showBlock('upload-progress', false);
+            showBlock('convert-progress', true);
+            document.getElementById('convert-label').textContent = 'Starting...';
             document.getElementById('convert-pct').textContent = '';
 
             var pollTimer = setInterval(function () {
@@ -705,18 +1069,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             var fd = new FormData(form);
             var xhr = new XMLHttpRequest();
 
-            xhr.upload.addEventListener('progress', function (ev) {
-                if (!ev.lengthComputable) return;
-                var pct = Math.round((ev.loaded / ev.total) * 100);
-                setBar('upload-bar', pct, false);
-                document.getElementById('upload-pct').textContent = pct + '%';
-                document.getElementById('upload-sub').textContent =
-                    fmt(ev.loaded) + ' / ' + fmt(totalSize) + ' (' + fmt(Math.max(0, totalSize - ev.loaded)) + ' remaining)';
-                if (pct >= 100) {
-                    document.getElementById('upload-label').textContent = 'Upload complete. Converting...';
-                }
-            });
-
             xhr.addEventListener('load', function () {
                 clearInterval(pollTimer);
                 btn.disabled = false;
@@ -724,14 +1076,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 try {
                     var res = JSON.parse(xhr.responseText);
                     if (res.ok) {
-                        showBlock('upload-progress', true);
-                        document.getElementById('upload-label').textContent = 'Upload complete.';
-                        document.getElementById('upload-pct').textContent = '100%';
-                        document.getElementById('upload-sub').textContent = '';
                         setBar('convert-bar', 100, false);
-                        document.getElementById('convert-label').textContent = 'Done — extracted ' + res.files.length + ' page(s)!';
+                        document.getElementById('convert-label').textContent = 'Done — extracted ' + res.files.length + ' image(s)!';
+                        document.getElementById('convert-pct').textContent = '100%';
                         renderResults(res.files);
                         form.reset();
+                        resetLoadedUI();
                     } else {
                         showError(res.error || 'Conversion failed.');
                         setBar('convert-bar', 0, false);
@@ -747,13 +1097,26 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 clearInterval(pollTimer);
                 btn.disabled = false;
                 btn.textContent = 'Extract Images';
-                showError('Network error during upload or processing.');
+                showError('Network error during processing.');
             });
 
             xhr.open('POST', '', true);
             xhr.setRequestHeader('X-Requested-With', 'XMLHttpRequest');
             xhr.send(fd);
         });
+
+        function resetLoadedUI() {
+            state.loaded = false;
+            state.total = 0;
+            state.loadedName = '';
+            useCacheInput.value = '';
+            document.getElementById('range-loaded').classList.remove('visible');
+            document.getElementById('specific-loaded').classList.remove('visible');
+            document.getElementById('grid-tools').classList.remove('visible');
+            document.getElementById('page-grid').innerHTML = '';
+            document.getElementById('range-to').value = '';
+            document.getElementById('range-from').value = '1';
+        }
 
         function renderResults(files) {
             var html = '<a class="zip-btn" id="zip-btn" href="?action=zip&files=' +
@@ -764,6 +1127,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             });
             resultsBox.innerHTML = html;
         }
+
+        rotateToken();
     })();
     </script>
 </body>

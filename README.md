@@ -5,9 +5,12 @@ A simple PHP page to extract images from a PDF file, using ImageMagick (Imagick)
 ## Features
 
 - Upload a PDF file
-- Choose which pages to process: `all`, a list like `1,3,5`, or a range like `2-5`
+- Flexible page selection with three choices:
+  - **All** — every page
+  - **Range** — from/to page numbers, validated against the PDF's actual page count
+  - **Specific** — checkboxes for each page (shown after loading the PDF)
 - Two extraction modes:
-  - **Convert pages to images** — renders each selected page at 300 DPI (print quality) as a full-page JPG
+  - **Convert pages to images** — renders each selected page as a full-page JPG (DPI selectable: 72/96/150/200/300)
   - **Extract images inside pages** — pulls out the original embedded photos/images as JPGs (JPEG/DCTDecode, FlateDecode with PNG predictors, JPEG2000; CMYK and grayscale supported)
 - Live progress bars: upload status (bytes uploaded / remaining) and conversion progress (page N of M)
 - Results previews with individual download links and a **Download all as ZIP** button
