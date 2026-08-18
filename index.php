@@ -517,6 +517,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             padding: 40px;
             width: 100%;
             max-width: 600px;
+            margin-bottom: 24px;
         }
         h1 { font-size: 24px; color: #1a1a2e; margin-bottom: 6px; }
         p.sub { color: #6b7280; font-size: 14px; margin-bottom: 28px; }
