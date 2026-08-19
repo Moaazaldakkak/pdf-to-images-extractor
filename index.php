@@ -347,6 +347,18 @@ if (isset($_GET['ajax']) && $_GET['ajax'] === 'cancel') {
     exit;
 }
 
+if (isset($_GET['ajax']) && $_GET['ajax'] === 'discard') {
+    header('Content-Type: application/json');
+    $token = sanitizeToken($_GET['token'] ?? '');
+    if ($token !== '') {
+        @unlink($uploadDir . '/' . $token . '.pdf');
+        @unlink($progressDir . '/' . $token . '.cancel');
+        @unlink($progressDir . '/' . $token . '.json');
+    }
+    echo json_encode(['ok' => true]);
+    exit;
+}
+
 if (isset($_GET['ajax']) && $_GET['ajax'] === 'progress') {
     header('Content-Type: application/json');
     $token = sanitizeToken($_GET['token'] ?? '');
@@ -638,6 +650,34 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         .drop-file.visible { display: block; margin-top: 6px; }
         #cancel-row { display: none; width: 100%; justify-content: center; margin-bottom: 0; }
         #cancel-row.visible { display: flex; }
+        #upload-form { position: relative; }
+        #upload-overlay {
+            position: absolute;
+            inset: 0;
+            background: rgba(255, 255, 255, 0.72);
+            border-radius: 12px;
+            display: none;
+            align-items: center;
+            justify-content: center;
+            z-index: 20;
+        }
+        #upload-overlay.visible { display: flex; }
+        #upload-overlay .btn-danger-ghost {
+            width: 50%;
+            background: #f0f2f5;
+            color: #dc3545;
+            border: 1px solid #dc3545;
+            padding: 12px 32px;
+            font-size: 15px;
+            font-weight: 600;
+            border-radius: 6px;
+            cursor: pointer;
+            transition: background 0.15s, color 0.15s;
+            box-shadow: 0 6px 18px rgba(220, 53, 69, 0.2);
+        }
+        #upload-overlay .btn-danger-ghost:hover { background: #dc3545; color: #fff; }
+        #upload-overlay .btn-danger-ghost:disabled { opacity: 0.65; cursor: not-allowed; }
+        #upload-overlay .btn-danger-ghost:disabled:hover { background: #f0f2f5; color: #dc3545; }
         .alert { border-radius: 8px; padding: 14px; margin-bottom: 20px; font-size: 14px; }
         .alert.error { background: #fef2f2; color: #b91c1c; border: 1px solid #fecaca; }
         .alert.success { background: #f0fdf4; color: #15803d; border: 1px solid #bbf7d0; }
@@ -673,7 +713,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             animation: pulse 1.2s ease-in-out infinite;
         }
         @keyframes pulse { 0%, 100% { opacity: 0.35; } 50% { opacity: 1; } }
-        .progress-block { display: none; margin: 18px 0; }
+        .progress-block { display: none; margin: 18px 0; position: relative; z-index: 21; }
         .progress-block.visible { display: block; }
         .progress-sub { font-size: 12px; color: #9ca3af; margin-top: 4px; text-align: right; }
         .section { margin-bottom: 24px; }
@@ -712,8 +752,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         .detail-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 10px; font-size: 14px; color: #374151; }
         .loaded-badge { display: none; margin-top: 10px; padding: 8px 12px; background: #eef2ff; color: #4338ca; border-radius: 6px; font-size: 13px; font-weight: 600; }
         .loaded-badge.visible { display: block; }
-        #load-row { display: none; margin-bottom: 10px; }
-        #load-row.visible { display: block; }
         .page-grid { margin-top: 10px; max-height: 260px; overflow-y: auto; display: grid; grid-template-columns: repeat(auto-fill, minmax(64px, 1fr)); gap: 6px; }
         .page-grid label {
             display: flex;
@@ -801,10 +839,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     </label>
                 </div>
 
-                <div id="load-row">
-                    <button type="button" class="mini-btn" id="load-btn">Load pages from PDF</button>
-                </div>
-
                 <div class="mode-detail" id="detail-all">
                     <span class="page-hint">All pages of the uploaded PDF will be processed.</span>
                 </div>
@@ -875,6 +909,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             <div class="detail-row" id="cancel-row">
                 <button type="button" class="mini-btn ghost" id="cancel-btn">Cancel conversion</button>
             </div>
+
+            <div id="upload-overlay">
+                <button type="button" class="btn-danger-ghost" id="cancel-upload-btn">Cancel upload</button>
+            </div>
         </form>
 
         <div id="js-error" class="alert error" style="display:none;"></div>
@@ -918,7 +956,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         var cancelRow = document.getElementById('cancel-row');
         var converting = false;
 
-        var state = { loaded: false, total: 0, loadedName: '' };
+        var state = { loaded: false, total: 0, loadedName: '', uploading: false };
+        var uploadXhr = null;
 
         function fmt(bytes) {
             if (bytes < 1024) return bytes + ' B';
@@ -945,6 +984,40 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
         function hideError() {
             errBox.style.display = 'none';
+        }
+
+        function setFormEnabled(on) {
+            var els = [
+                document.getElementById('pdf'),
+                document.getElementById('range-from'),
+                document.getElementById('range-to'),
+                document.getElementById('dpi-select'),
+                document.getElementById('select-all-btn'),
+                document.getElementById('clear-all-btn'),
+                btn
+            ];
+            document.querySelectorAll('#form-fields input[name="pageMode"], #form-fields input[name="mode"]').forEach(function (el) {
+                els.push(el);
+            });
+            els.forEach(function (el) { if (el) el.disabled = !on; });
+        }
+
+        function resetToNoFile() {
+            var dt = new DataTransfer();
+            fileInput.files = dt.files;
+            resetLoadedUI();
+            updateDropUI();
+            setFormEnabled(false);
+            fileInput.disabled = false;
+        }
+
+        function cancelUpload() {
+            state.uploading = false;
+            if (uploadXhr) { uploadXhr.abort(); uploadXhr = null; }
+            fetch('?ajax=discard&token=' + encodeURIComponent(tokenInput.value)).catch(function () {});
+            document.getElementById('upload-overlay').classList.remove('visible');
+            showBlock('upload-progress', false);
+            resetToNoFile();
         }
 
         function setBusy(on) {
@@ -1002,6 +1075,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             document.getElementById('convert-label').textContent = 'Cancelling after current page...';
         });
 
+        document.getElementById('cancel-upload-btn').addEventListener('click', function () {
+            if (state.uploading) {
+                cancelUpload();
+            }
+        });
+
         function notifyUser(body) {
             try {
                 if (('Notification' in window) && Notification.permission === 'granted') {
@@ -1032,7 +1111,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             document.getElementById('detail-all').classList.toggle('visible', mode === 'all');
             document.getElementById('detail-range').classList.toggle('visible', mode === 'range');
             document.getElementById('detail-specific').classList.toggle('visible', mode === 'specific');
-            document.getElementById('load-row').classList.toggle('visible', mode !== 'all');
         }
 
         document.querySelectorAll('input[name="pageMode"]').forEach(function (el) {
@@ -1086,8 +1164,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 return;
             }
             rotateToken();
+            state.uploading = true;
             var totalSize = fileInput.files[0].size;
             hideError();
+            setFormEnabled(false);
+            document.getElementById('upload-overlay').classList.add('visible');
             showBlock('upload-progress', true);
             showBlock('convert-progress', false);
             setBar('upload-bar', 0, false);
@@ -1100,6 +1181,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             fd.append('token', tokenInput.value);
             fd.append('pdf', fileInput.files[0]);
             var xhr = new XMLHttpRequest();
+            uploadXhr = xhr;
 
             xhr.upload.addEventListener('progress', function (ev) {
                 if (!ev.lengthComputable) return;
@@ -1111,9 +1193,15 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             });
 
             xhr.addEventListener('load', function () {
+                state.uploading = false;
+                uploadXhr = null;
+                document.getElementById('upload-overlay').classList.remove('visible');
+                fileInput.disabled = false;
                 try {
                     var res = JSON.parse(xhr.responseText);
                     if (res.ok) {
+                        showBlock('upload-progress', false);
+                        setFormEnabled(true);
                         onDone(res);
                     } else {
                         showBlock('upload-progress', false);
@@ -1126,8 +1214,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             });
 
             xhr.addEventListener('error', function () {
+                if (!state.uploading) return;
+                state.uploading = false;
+                uploadXhr = null;
+                document.getElementById('upload-overlay').classList.remove('visible');
                 showBlock('upload-progress', false);
-                showError('Network error while uploading.');
+                fileInput.disabled = false;
+                showError('Network error while uploading. Please try selecting the file again.');
             });
 
             xhr.open('POST', '', true);
@@ -1188,8 +1281,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 applyLoaded(res.total, res.name);
             });
         }
-
-        document.getElementById('load-btn').addEventListener('click', loadPages);
 
         document.getElementById('select-all-btn').addEventListener('click', function () {
             document.querySelectorAll('#page-grid input').forEach(function (cb) {
@@ -1303,7 +1394,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                         renderResults(res.files);
                         notifyUser('Done! Extracted ' + res.files.length + ' image(s).');
                         form.reset();
-                        resetLoadedUI();
+                        resetToNoFile();
                     } else {
                         var cancelled = res.error && res.error.toLowerCase().indexOf('cancel') !== -1;
                         showError(res.error || 'Conversion failed.');
@@ -1355,6 +1446,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         }
 
         rotateToken();
+        resetToNoFile();
     })();
     </script>
 </body>

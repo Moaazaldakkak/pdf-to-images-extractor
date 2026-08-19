@@ -13,7 +13,8 @@ A simple PHP page to extract images from a PDF file, using ImageMagick (Imagick)
   - **Convert pages to images** — renders each selected page as a full-page JPG (DPI selectable: 72/96/150/200/300)
   - **Extract images inside pages** — pulls out the original embedded photos/images as JPGs (JPEG/DCTDecode, FlateDecode with PNG predictors, JPEG2000; CMYK and grayscale supported)
 - Live progress bars: upload status (bytes uploaded / remaining) and per-page conversion progress (page N of M)
-- **Cancel** button during conversion — stops after the current page and removes partial output
+- **Cancel** buttons — cancel an upload in progress (discards the file) or stop a conversion after the current page (removes partial output)
+- Everything else stays disabled until the PDF upload completes
 - Notification (desktop + page title) when processing finishes or fails
 - Results previews with individual download links and a **Download all as ZIP** button
 - Friendly error for encrypted / password-protected PDFs
