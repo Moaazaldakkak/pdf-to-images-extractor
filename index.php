@@ -13,6 +13,26 @@ function sanitizeToken(string $token): string
     return preg_replace('/[^a-zA-Z0-9_-]/', '', $token);
 }
 
+function isCancelRequested(string $token): bool
+{
+    global $progressDir;
+    return $token !== '' && file_exists($progressDir . '/' . $token . '.cancel');
+}
+
+function isEncryptedPdf(string $path): bool
+{
+    $size = @filesize($path);
+    if ($size === false) {
+        return false;
+    }
+    $head = (string)@file_get_contents($path, false, null, 0, 65536);
+    $tail = '';
+    if ($size > 131072) {
+        $tail = (string)@file_get_contents($path, false, null, $size - 65536, 65536);
+    }
+    return (bool)preg_match('/\/Encrypt\s+\d+\s+\d+\s+R/', $head . $tail);
+}
+
 function applyPngPredictor(string $data, int $colors, int $bpc, int $columns): string
 {
     if ($bpc !== 8) {
@@ -123,6 +143,13 @@ function extractEmbeddedImages(string $pdfPath, array $pages, string $outputDir,
     $seen = [];
     $stamp = time();
     foreach ($pages as $pi => $pageNo) {
+        if (isCancelRequested($token)) {
+            foreach ($files as $n) {
+                @unlink($outputDir . '/' . $n);
+            }
+            $files = [];
+            throw new Exception('Conversion cancelled.');
+        }
         $page = $allPages[$pageNo - 1];
         $xobjs = $page->getXObjects();
         $seq = 0;
@@ -308,6 +335,18 @@ if (isset($_GET['action']) && $_GET['action'] === 'zip') {
     exit;
 }
 
+if (isset($_GET['ajax']) && $_GET['ajax'] === 'cancel') {
+    header('Content-Type: application/json');
+    $token = sanitizeToken($_GET['token'] ?? '');
+    if ($token !== '') {
+        @file_put_contents($progressDir . '/' . $token . '.cancel', '1', LOCK_EX);
+        echo json_encode(['ok' => true]);
+    } else {
+        echo json_encode(['ok' => false]);
+    }
+    exit;
+}
+
 if (isset($_GET['ajax']) && $_GET['ajax'] === 'progress') {
     header('Content-Type: application/json');
     $token = sanitizeToken($_GET['token'] ?? '');
@@ -341,10 +380,16 @@ if (($_POST['ajax'] ?? '') === 'upload') {
     }
     sweepUploads($uploadDir);
     sweepOld($progressDir, 'json');
+    sweepOld($progressDir, 'cancel');
     $dest = $uploadDir . '/' . $token . '.pdf';
     @unlink($dest);
     if (!move_uploaded_file($file['tmp_name'], $dest)) {
         echo json_encode(['ok' => false, 'error' => 'Could not store the uploaded PDF.']);
+        exit;
+    }
+    if (isEncryptedPdf($dest)) {
+        @unlink($dest);
+        echo json_encode(['ok' => false, 'error' => 'This PDF is encrypted or password-protected. Remove the password (e.g. print it to PDF) and try again.']);
         exit;
     }
     try {
@@ -366,9 +411,9 @@ if (($_POST['ajax'] ?? '') === 'upload') {
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $token = sanitizeToken($_POST['token'] ?? '');
+    $useCache = !empty($_POST['useCache']);
+    $cached = $uploadDir . '/' . $token . '.pdf';
     try {
-        $useCache = !empty($_POST['useCache']);
-        $cached = $uploadDir . '/' . $token . '.pdf';
         if ($useCache) {
             if ($token === '' || !is_file($cached)) {
                 throw new Exception('The uploaded PDF expired. Please upload the file and load the pages again.');
@@ -383,6 +428,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 throw new Exception('The uploaded file must be a PDF.');
             }
             $pdfPath = $file['tmp_name'];
+        }
+        if (isEncryptedPdf($pdfPath)) {
+            throw new Exception('This PDF is encrypted or password-protected. Remove the password (e.g. print it to PDF) and try again.');
         }
         $mode = $_POST['mode'] ?? 'convert';
         if (!in_array($mode, ['convert', 'extract'], true)) {
@@ -470,6 +518,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $imagick->destroy();
                 $files[] = $name;
                 writeProgress($token, ['phase' => 'converting', 'done' => $i + 1, 'total' => count($pages), 'message' => 'Converting page ' . $page . ' of ' . $totalPages . '...']);
+                if (isCancelRequested($token)) {
+                    foreach ($files as $n) {
+                        @unlink($outputDir . '/' . $n);
+                    }
+                    $files = [];
+                    throw new Exception('Conversion cancelled.');
+                }
             }
 
             $success = true;
@@ -477,8 +532,17 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         }
     } catch (Exception $e) {
         $errors[] = $e->getMessage();
-        writeProgress($token, ['phase' => 'error', 'message' => $e->getMessage()]);
+        if (isCancelRequested($token)) {
+            writeProgress($token, ['phase' => 'cancelled', 'done' => 0, 'total' => 0, 'message' => 'Conversion cancelled.', 'files' => []]);
+        } else {
+            writeProgress($token, ['phase' => 'error', 'message' => $e->getMessage()]);
+        }
     }
+
+    if ($useCache && $token !== '' && is_file($cached)) {
+        @unlink($cached);
+    }
+    @unlink($progressDir . '/' . $token . '.cancel');
 
     if ($isXhr) {
         header('Content-Type: application/json');
@@ -557,6 +621,23 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         .mini-btn:hover { background: #4338ca; }
         .mini-btn.ghost { background: #fff; color: #4f46e5; border: 1px solid #c7d2fe; }
         .mini-btn.ghost:hover { background: #eef2ff; }
+        .drop-zone {
+            border: 2px dashed #cbd5e1;
+            border-radius: 8px;
+            background: #f9fafb;
+            padding: 28px 14px;
+            text-align: center;
+            cursor: pointer;
+            margin-bottom: 20px;
+            transition: border-color 0.2s, background 0.2s;
+        }
+        .drop-zone.dragover { border-color: #4f46e5; background: #eef2ff; }
+        .drop-zone input[type="file"] { display: none; }
+        .drop-hint { font-size: 14px; color: #6b7280; }
+        .drop-file { display: none; font-size: 14px; font-weight: 600; color: #4338ca; }
+        .drop-file.visible { display: block; margin-top: 6px; }
+        #cancel-row { display: none; width: 100%; justify-content: center; margin-bottom: 0; }
+        #cancel-row.visible { display: flex; }
         .alert { border-radius: 8px; padding: 14px; margin-bottom: 20px; font-size: 14px; }
         .alert.error { background: #fef2f2; color: #b91c1c; border: 1px solid #fecaca; }
         .alert.success { background: #f0fdf4; color: #15803d; border: 1px solid #bbf7d0; }
@@ -631,6 +712,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         .detail-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 10px; font-size: 14px; color: #374151; }
         .loaded-badge { display: none; margin-top: 10px; padding: 8px 12px; background: #eef2ff; color: #4338ca; border-radius: 6px; font-size: 13px; font-weight: 600; }
         .loaded-badge.visible { display: block; }
+        #load-row { display: none; margin-bottom: 10px; }
+        #load-row.visible { display: block; }
         .page-grid { margin-top: 10px; max-height: 260px; overflow-y: auto; display: grid; grid-template-columns: repeat(auto-fill, minmax(64px, 1fr)); gap: 6px; }
         .page-grid label {
             display: flex;
@@ -697,7 +780,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             <div id="form-fields" class="form-fields">
             <div class="section">
                 <label class="block" for="pdf">PDF file</label>
-                <input type="file" name="pdf" id="pdf" accept="application/pdf" required>
+                <div class="drop-zone" id="drop-zone">
+                    <input type="file" name="pdf" id="pdf" accept="application/pdf" required>
+                    <span class="drop-hint" id="drop-hint">Drag &amp; drop PDF here, or click to browse</span>
+                    <span class="drop-file" id="drop-file"></span>
+                </div>
             </div>
 
             <div class="section">
@@ -714,6 +801,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     </label>
                 </div>
 
+                <div id="load-row">
+                    <button type="button" class="mini-btn" id="load-btn">Load pages from PDF</button>
+                </div>
+
                 <div class="mode-detail" id="detail-all">
                     <span class="page-hint">All pages of the uploaded PDF will be processed.</span>
                 </div>
@@ -722,15 +813,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     <div class="detail-row">
                         From <input type="number" name="rangeFrom" id="range-from" min="1" value="1">
                         to <input type="number" name="rangeTo" id="range-to" min="1" value="">
-                        <button type="button" class="mini-btn" id="load-btn-range">Load pages from PDF</button>
                     </div>
                     <div class="loaded-badge" id="range-loaded"></div>
                 </div>
 
                 <div class="mode-detail" id="detail-specific">
-                    <div class="detail-row">
-                        <button type="button" class="mini-btn" id="load-btn-specific">Load pages from PDF</button>
-                    </div>
                     <div class="loaded-badge" id="specific-loaded"></div>
                     <div class="grid-tools" id="grid-tools">
                         <button type="button" class="mini-btn ghost" id="select-all-btn">Select all</button>
@@ -785,6 +872,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             </div>
 
             <button type="submit" id="submit-btn">Extract Images</button>
+            <div class="detail-row" id="cancel-row">
+                <button type="button" class="mini-btn ghost" id="cancel-btn">Cancel conversion</button>
+            </div>
         </form>
 
         <div id="js-error" class="alert error" style="display:none;"></div>
@@ -821,6 +911,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         var errBox = document.getElementById('js-error');
         var resultsBox = document.getElementById('results');
         var fileInput = document.getElementById('pdf');
+        var dropZone = document.getElementById('drop-zone');
+        var dropHint = document.getElementById('drop-hint');
+        var dropFile = document.getElementById('drop-file');
+        var cancelBtn = document.getElementById('cancel-btn');
+        var cancelRow = document.getElementById('cancel-row');
+        var converting = false;
 
         var state = { loaded: false, total: 0, loadedName: '' };
 
@@ -855,7 +951,56 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             document.getElementById('form-fields').classList.toggle('busy', on);
             btn.disabled = on;
             btn.textContent = on ? 'Working...' : 'Extract Images';
+            if (on) {
+                converting = true;
+                cancelRow.classList.add('visible');
+                cancelBtn.disabled = false;
+                cancelBtn.textContent = 'Cancel conversion';
+            } else {
+                converting = false;
+                cancelRow.classList.remove('visible');
+            }
         }
+
+        function updateDropUI() {
+            if (fileInput.files.length) {
+                dropHint.style.display = 'none';
+                dropFile.textContent = fileInput.files[0].name + ' (' + fmt(fileInput.files[0].size) + ')';
+                dropFile.classList.add('visible');
+            } else {
+                dropHint.style.display = '';
+                dropFile.textContent = '';
+                dropFile.classList.remove('visible');
+            }
+        }
+
+        dropZone.addEventListener('click', function () { fileInput.click(); });
+        ['dragenter', 'dragover'].forEach(function (ev) {
+            dropZone.addEventListener(ev, function (e) { e.preventDefault(); dropZone.classList.add('dragover'); });
+        });
+        dropZone.addEventListener('dragleave', function () { dropZone.classList.remove('dragover'); });
+        dropZone.addEventListener('drop', function (e) {
+            e.preventDefault();
+            dropZone.classList.remove('dragover');
+            var f = e.dataTransfer.files && e.dataTransfer.files[0];
+            if (!f || !fileInput.files) return;
+            if (f.type !== 'application/pdf' && !/\.pdf$/i.test(f.name)) {
+                showError('Only PDF files are supported.');
+                return;
+            }
+            var dt = new DataTransfer();
+            dt.items.add(f);
+            fileInput.files = dt.files;
+            fileInput.dispatchEvent(new Event('change', { bubbles: true }));
+        });
+
+        cancelBtn.addEventListener('click', function () {
+            if (!converting) return;
+            cancelBtn.disabled = true;
+            cancelBtn.textContent = 'Cancelling...';
+            fetch('?ajax=cancel&token=' + encodeURIComponent(tokenInput.value)).catch(function () {});
+            document.getElementById('convert-label').textContent = 'Cancelling after current page...';
+        });
 
         function notifyUser(body) {
             try {
@@ -887,6 +1032,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             document.getElementById('detail-all').classList.toggle('visible', mode === 'all');
             document.getElementById('detail-range').classList.toggle('visible', mode === 'range');
             document.getElementById('detail-specific').classList.toggle('visible', mode === 'specific');
+            document.getElementById('load-row').classList.toggle('visible', mode !== 'all');
         }
 
         document.querySelectorAll('input[name="pageMode"]').forEach(function (el) {
@@ -930,6 +1076,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             document.getElementById('page-grid').innerHTML = '';
             document.getElementById('range-to').value = '';
             document.getElementById('range-from').value = '1';
+            updateDropUI();
+            loadPages();
         });
 
         function uploadForPageCount(onDone) {
@@ -1004,40 +1152,44 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             }
         }
 
-        document.getElementById('load-btn-range').addEventListener('click', function () {
-            uploadForPageCount(function (res) {
-                showBlock('upload-progress', false);
-                state.loaded = true;
-                state.total = res.total;
-                state.loadedName = res.name;
-                useCacheInput.value = '1';
-                var from = document.getElementById('range-from');
-                var to = document.getElementById('range-to');
-                from.value = 1;
-                from.max = res.total;
-                to.value = res.total;
-                to.max = res.total;
-                to.min = 1;
-                var badge = document.getElementById('range-loaded');
-                badge.textContent = 'PDF loaded — ' + res.total + ' pages. Valid range: 1 to ' + res.total + '.';
-                badge.classList.add('visible');
-            });
-        });
+        function applyLoaded(total, name) {
+            var from = document.getElementById('range-from');
+            var to = document.getElementById('range-to');
+            from.value = 1;
+            from.max = total;
+            to.value = total;
+            to.max = total;
+            to.min = 1;
+            var rangeBadge = document.getElementById('range-loaded');
+            rangeBadge.textContent = 'PDF loaded — ' + total + ' pages. Valid range: 1 to ' + total + '.';
+            rangeBadge.classList.add('visible');
+            buildPageGrid(total);
+            var specificBadge = document.getElementById('specific-loaded');
+            specificBadge.textContent = 'PDF loaded — ' + total + ' pages. Pick which pages to extract:';
+            specificBadge.classList.add('visible');
+            document.getElementById('grid-tools').classList.add('visible');
+        }
 
-        document.getElementById('load-btn-specific').addEventListener('click', function () {
+        function loadPages() {
+            if (!fileInput.files.length) {
+                showError('Please choose a PDF file first.');
+                return;
+            }
+            if (state.loaded && useCacheInput.value === '1') {
+                applyLoaded(state.total, state.loadedName);
+                return;
+            }
             uploadForPageCount(function (res) {
                 showBlock('upload-progress', false);
                 state.loaded = true;
                 state.total = res.total;
                 state.loadedName = res.name;
                 useCacheInput.value = '1';
-                buildPageGrid(res.total);
-                var badge = document.getElementById('specific-loaded');
-                badge.textContent = 'PDF loaded — ' + res.total + ' pages. Pick which pages to extract:';
-                badge.classList.add('visible');
-                document.getElementById('grid-tools').classList.add('visible');
+                applyLoaded(res.total, res.name);
             });
-        });
+        }
+
+        document.getElementById('load-btn').addEventListener('click', loadPages);
 
         document.getElementById('select-all-btn').addEventListener('click', function () {
             document.querySelectorAll('#page-grid input').forEach(function (cb) {
@@ -1124,6 +1276,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                             setBar('convert-bar', 100, false);
                             label.textContent = 'Done!';
                             pct.textContent = '100%';
+                        } else if (p.phase === 'cancelled') {
+                            setBar('convert-bar', 0, false);
+                            label.textContent = p.message || 'Cancelled.';
+                            pct.textContent = '';
                         } else if (p.phase === 'error') {
                             setBar('convert-bar', 0, false);
                             label.textContent = p.message || 'Conversion failed.';
@@ -1149,11 +1305,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                         form.reset();
                         resetLoadedUI();
                     } else {
+                        var cancelled = res.error && res.error.toLowerCase().indexOf('cancel') !== -1;
                         showError(res.error || 'Conversion failed.');
                         setBar('convert-bar', 0, false);
-                        document.getElementById('convert-label').textContent = 'Failed.';
+                        document.getElementById('convert-label').textContent = cancelled ? 'Cancelled.' : 'Failed.';
                         document.getElementById('convert-pct').textContent = '';
-                        notifyUser('Conversion failed.');
+                        notifyUser(cancelled ? 'Conversion cancelled.' : 'Conversion failed.');
                     }
                 } catch (ex) {
                     showError('Unexpected server response.');
@@ -1184,6 +1341,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             document.getElementById('page-grid').innerHTML = '';
             document.getElementById('range-to').value = '';
             document.getElementById('range-from').value = '1';
+            updateDropUI();
         }
 
         function renderResults(files) {
